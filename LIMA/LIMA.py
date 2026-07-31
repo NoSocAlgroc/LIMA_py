@@ -62,7 +62,12 @@ class LIMA:
             for column, dtype in self.dataset.dtypes.items()
         ]
 
-    def step(self, n: int=100000) -> bool:
+    def getStepSize(self, iteration: int) -> int:
+        """Sample size for `iteration`: doubles from 2**10 up to a cap of
+        2**17, reached once iteration >= 7."""
+        return 1 << (10 + min(iteration, 7))
+
+    def step(self, iteration: int) -> bool:
         """Run one round: schedule, sample, update.
 
         Returns True immediately if the schedule comes back empty (nothing
@@ -72,6 +77,7 @@ class LIMA:
         if not sched.parents:
             return True
 
+        n = self.getStepSize(iteration)
         result = self.sampler.sample(sched, self.domain, self.predicate_groups, self.state, n)
         self.state.update(result.counts, self.devs)
         return False
@@ -110,7 +116,7 @@ class LIMA:
         containing x.
         """
         npgs = len(self.predicate_groups)
-        matrix: npt.NDArray[np.float64] = np.full((npgs, npgs), -np.inf)
+        matrix: npt.NDArray[np.float64] = np.full((npgs, npgs), 0.0)
 
         for edge in self.state.soundEdges:
             c = edge.pg
