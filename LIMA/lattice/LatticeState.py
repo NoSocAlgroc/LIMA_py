@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Set, Tuple
+from typing import Dict, Iterator, Optional, Set, Tuple
 
 from LIMA.lattice.Lattice import Lattice
 from util.stats.betaDist import BetaDist
@@ -23,21 +23,41 @@ class LatticeState(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def getEdgeDist(self, edge: Lattice.Edge) -> BetaDist:
+        """Conditional distribution of the edge's target given its source."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def isEdgeExplored(self, edge: Lattice.Edge) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def exploredEdges(self) -> Iterator[Lattice.Edge]:
+        """Every edge with a recorded conditional distribution."""
+        raise NotImplementedError
+
+    @abstractmethod
     def update(
-        self, results: Dict[Lattice.Node, Tuple[int, int]], threshold: float
+        self,
+        results: Dict[Lattice.Node, Tuple[int, int]],
+        threshold: float,
+        edge_results: Optional[Dict[Lattice.Edge, Tuple[int, int]]] = None,
     ) -> None:
         """Add a sampling round's results (as produced by a Sampler - just
         its `counts` dict, to avoid importing the sampler classes here) to
         each node's distribution, then refresh sound/candidate edges to
         reflect the updated distributions.
+
+        If `edge_results` is provided, its conditional edge counts are added
+        too and soundness is tested on edge distributions; otherwise the
+        legacy node-only path is used.
         """
         raise NotImplementedError
 
     @abstractmethod
     def _minSoundZ(self, edge: Lattice.Edge) -> float:
-        """The minimum (most negative) nodeDist4 z-score over every predicate
-        pg in the edge's parent - how sound `edge` is at its strongest
-        supporting comparison, on the same scale a soundness threshold
-        compares against.
+        """The minimum edge-interaction z-score over every predicate pg in
+        the edge's parent - how sound `edge` is at its strongest supporting
+        comparison, on the same scale a soundness threshold compares against.
         """
         raise NotImplementedError

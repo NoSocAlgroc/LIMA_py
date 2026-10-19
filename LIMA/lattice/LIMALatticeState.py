@@ -3,18 +3,20 @@ from collections import defaultdict
 from LIMA.lattice.Lattice import Lattice
 from LIMA.lattice.LatticeState import LatticeState
 from util.stats.betaDist import BetaDist, nodeDist4
-from typing import Dict, Iterator, List, Set, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 
 class LIMALatticeState(LatticeState):
-    """Concrete LatticeState: stores a BetaDist per explored node and a
-    cache of sound/candidate edges, maintained via a statistical soundness
-    test as new sampling results come in.
+    """Concrete LatticeState: stores a BetaDist per explored node and per
+    sampled edge, plus a cache of sound/candidate edges maintained via a
+    statistical soundness test as new sampling results come in.
     """
+
 
     def __init__(self, lattice: Lattice) -> None:
         self.lattice = lattice
         self._dists: Dict[Lattice.Node, BetaDist] = {}
+        self._edge_dists: Dict[Lattice.Edge, BetaDist] = {}
         # Cached set of edges deemed sound by the statistical test.
         # Populated/updated externally
         self.soundEdges: Set[Lattice.Edge] = set()
@@ -40,6 +42,15 @@ class LIMALatticeState(LatticeState):
     def getDist(self, n: Lattice.Node) -> BetaDist:
         return self._dists.get(n, BetaDist.empty())
 
+    def getEdgeDist(self, edge: Lattice.Edge) -> BetaDist:
+        return self._edge_dists.get(edge, BetaDist.empty())
+
+    def isEdgeExplored(self, edge: Lattice.Edge) -> bool:
+        return edge in self._edge_dists
+
+    def exploredEdges(self) -> Iterator[Lattice.Edge]:
+        return iter(self._edge_dists)
+
     def isExplored(self, n: Lattice.Node) -> bool:
         return n in self._dists
 
@@ -52,22 +63,41 @@ class LIMALatticeState(LatticeState):
             self._dists[n] = BetaDist.empty()
         self._dists[n].add(a, b)
 
+    def updateEdge(self, edge: Lattice.Edge, a: int, b: int) -> None:
+        """Add a conditional observation (child successes, parent successes
+        not child) to an edge's distribution."""
+        if edge not in self._edge_dists:
+            self._edge_dists[edge] = BetaDist.empty()
+        self._edge_dists[edge].add(a, b)
+
     def update(
-        self, results: Dict[Lattice.Node, Tuple[int, int]], threshold: float
+        self,
+        results: Dict[Lattice.Node, Tuple[int, int]],
+        threshold: float,
+        edge_results: Optional[Dict[Lattice.Edge, Tuple[int, int]]] = None,
     ) -> None:
-        """Add a sampling round's results (as produced by a Sampler - just
-        its `counts` dict, to avoid importing the sampler classes here) to
-        each node's distribution, then refresh sound/candidate edges to
-        reflect the updated distributions.
+        """Add a sampling round's results, then refresh sound/candidate edges.
+
+        With `edge_results`, conditional edge distributions are updated too
+        and soundness is tested on them; without it, the legacy node-only
+        path is used.
         """
         for n, (a, b) in results.items():
             self.updateNode(n, a, b)
-        self._updateSoundEdges(threshold)
+        if edge_results is not None:
+            for edge, (a, b) in edge_results.items():
+                self.updateEdge(edge, a, b)
+        self._updateSoundEdges(threshold, edge_results is not None)
 
-    def _updateSoundEdges(self, threshold: float) -> None:
+    def _updateSoundEdges(self, threshold: float, use_edge_stats: bool = False) -> None:
         newly_sound: List[Lattice.Edge] = []
         for edge in list(self.candidateEdges):
-            if self._isSound(edge, threshold):
+            sound = (
+                self._isSoundByEdge(edge, threshold)
+                if use_edge_stats
+                else self._isSoundByNode(edge, threshold)
+            )
+            if sound:
                 self.candidateEdges.discard(edge)
                 self.soundEdges.add(edge)
                 newly_sound.append(edge)
@@ -113,8 +143,15 @@ class LIMALatticeState(LatticeState):
         parent = n.fr(best_pg).fr()
         return parent.to(best_pg, n.preds[best_pg])
 
-    def _isSound(self, edge: Lattice.Edge, threshold: float) -> bool:
-        """Edge parent→child is sound if, for every predicate pg in parent,
+    def _supportEdge(self, edge: Lattice.Edge, pg: int) -> Lattice.Edge:
+        """The same added predicate applied to the parent without `pg`."""
+        parent = edge.fr()
+        return parent.fr(pg).fr().to(edge.pg, edge.p)
+
+    def _isSoundByNode(self, edge: Lattice.Edge, threshold: float) -> bool:
+        """Legacy node-distribution soundness test.
+
+        Edge parent→child is sound if, for every predicate pg in parent,
         nodeDist4(parent-pg, child-pg, parent, child) < -threshold.
 
         Each comparison asks: does this edge add more selectivity than the
@@ -122,50 +159,76 @@ class LIMALatticeState(LatticeState):
         """
         parent = edge.fr()
         from1_dist = self.getDist(parent)
-        to1 = edge.to()
-        to1_dist = self.getDist(to1)
+        to1_dist = self.getDist(edge.to())
         for pg in parent.preds:
-            subset = parent.fr(pg).fr()
-            edge2 = subset.to(edge.pg, edge.p)
-            to2 = edge2.to()
-            from2_dist = self.getDist(subset)
-            to2_dist = self.getDist(to2)
+            edge2 = self._supportEdge(edge, pg)
             z = nodeDist4(
                 from1_dist,
                 to1_dist,
-                from2_dist,
-                to2_dist,
+                self.getDist(parent.fr(pg).fr()),
+                self.getDist(edge2.to()),
             )
             if z >= -threshold:
                 return False
-            else:
-                pass
+        return True
+
+    def _isSoundByEdge(self, edge: Lattice.Edge, threshold: float) -> bool:
+        """Edge-distribution soundness test: compare the conditional edge
+        against every reduced-parent support edge. Missing edge statistics
+        fail closed.
+        """
+        if not self.isEdgeExplored(edge):
+            return False
+
+        for pg in edge.fr().preds:
+            support = self._supportEdge(edge, pg)
+            if not self.isEdgeExplored(support):
+                return False
+            if self._edgeInteractionZ(edge, support) >= -threshold:
+                return False
         return True
 
     def _minSoundZ(self, edge: Lattice.Edge) -> float:
-        """The minimum (most negative) nodeDist4 z-score over every predicate
-        pg in parent - i.e. how sound `edge` is at its strongest supporting
-        comparison, on the same scale `_isSound` thresholds against.
+        """The minimum edge-interaction z-score over every predicate pg in
+        the edge's parent - how sound `edge` is at its strongest supporting
+        comparison, on the same scale `_isSoundByEdge` thresholds against.
         """
-        parent = edge.fr()
-        from1_dist = self.getDist(parent)
-        to1 = edge.to()
-        to1_dist = self.getDist(to1)
+        if not self.isEdgeExplored(edge):
+            return math.inf
+
         best = math.inf
-        for pg in parent.preds:
-            subset = parent.fr(pg).fr()
-            edge2 = subset.to(edge.pg, edge.p)
-            to2 = edge2.to()
-            from2_dist = self.getDist(subset)
-            to2_dist = self.getDist(to2)
-            z = nodeDist4(
-                from1_dist,
-                to1_dist,
-                from2_dist,
-                to2_dist,
-            )
-            best = min(best, z)
+        for pg in edge.fr().preds:
+            support = self._supportEdge(edge, pg)
+            if not self.isEdgeExplored(support):
+                return math.inf
+            best = min(best, self._edgeInteractionZ(edge, support))
         return best
+
+    def _edgeInteractionZ(self, edge: Lattice.Edge, support: Lattice.Edge) -> float:
+        """Difference in conditional log-odds: negative means the edge is
+        more selective than its support edge.
+
+        If the edge has too little tail evidence, its own log-odds estimate
+        is driven mostly by its sample size. In that case the support is
+        replaced locally (never stored) by a distribution with the edge's
+        sample size and the support's rate, so both sides are compared at
+        equal evidence.
+        """
+        e = self.getEdgeDist(edge)
+        s = self.getEdgeDist(support)
+
+        if e.varLogOdds > 0.5:
+            n_edge = (e.a - 1) + (e.b - 1)
+            n_support = (s.a - 1) + (s.b - 1)
+            if 0 < n_edge <= n_support:
+                raw_a = int(round(n_edge * s.mean))
+                raw_a = min(max(raw_a, 0), n_edge)
+                s = BetaDist.empty()
+                s.add(raw_a, n_edge - raw_a)
+
+        m = e.meanLogOdds - s.meanLogOdds
+        v = e.varLogOdds + s.varLogOdds
+        return m / math.sqrt(v)
 
     def _isCandidate(self, edge: Lattice.Edge) -> bool:
         """Edge parent→child is candidate if every parallel support edge is sound.
@@ -173,9 +236,8 @@ class LIMALatticeState(LatticeState):
         For each predicate in parent, remove it and check that the same-predicate
         edge from that reduced parent is in soundEdges.
         """
-        parent = edge.fr()
-        for pg in parent.preds:
-            if parent.fr(pg).fr().to(edge.pg, edge.p) not in self.soundEdges:
+        for pg in edge.fr().preds:
+            if self._supportEdge(edge, pg) not in self.soundEdges:
                 return False
         return True
 

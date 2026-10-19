@@ -59,18 +59,23 @@ y4=y4f()
 
 class BetaDist:
     # Tracks a Beta(a,b) distribution representing selectivity p ∈ (0,1).
-    # Sufficient statistics in log-odds space:
-    #   meanLO = E[logit(p)] ≈ ψ(a) - ψ(b)
-    #   varLO  = Var[logit(p)] ≈ ψ₁(a) + ψ₁(b)
+    # Sufficient statistics:
+    #   meanLO      = E[log(p)]      ≈ ψ(a) - ψ(a+b)
+    #   varLO       = Var(log(p))    ≈ ψ₁(a) - ψ₁(a+b)
+    #   meanLogOdds = E[logit(p)]    ≈ ψ(a) - ψ(b)
+    #   varLogOdds  = Var(logit(p))  ≈ ψ₁(a) + ψ₁(b)
     # Gradients dmda/dmdb and dvda/dvdb are with respect to a and b.
 
-    def __init__(self,a:int,b:int,mean:float,meanLO:float,varLO:float,sdLO:float,dmda:float,dmdb:float,dvda:float,dvdb:float) -> None:
+    def __init__(self,a:int,b:int,mean:float,meanLO:float,varLO:float,sdLO:float,meanLogOdds:float,varLogOdds:float,sdLogOdds:float,dmda:float,dmdb:float,dvda:float,dvdb:float) -> None:
         self.a=a
         self.b=b
         self.mean=mean
         self.meanLO=meanLO
         self.varLO=varLO
         self.sdLO=sdLO
+        self.meanLogOdds=meanLogOdds
+        self.varLogOdds=varLogOdds
+        self.sdLogOdds=sdLogOdds
         self.dmda=dmda
         self.dmdb=dmdb
         self.dvda=dvda
@@ -79,18 +84,19 @@ class BetaDist:
     @staticmethod
     def empty()->'BetaDist':
         # Uninformative prior Beta(1,1) = Uniform[0,1]
-        res= BetaDist(0,0,0,0,0,0,0,0,0,0)
+        res= BetaDist(0,0,0,0,0,0,0,0,0,0,0,0,0)
         res.add(1,1)
         return res
 
 
     def updateStats(self):
         self.mean=self.a/(self.a+self.b)
-        #self.meanLO=y1(self.a)-y1(self.b)
-        #self.varLO=y2(self.a)+y2(self.b)
         self.meanLO=y1(self.a)-y1(self.a+self.b)
         self.varLO=y2(self.a)-y2(self.a+self.b)
         self.sdLO=math.sqrt(self.varLO)
+        self.meanLogOdds=y1(self.a)-y1(self.b)
+        self.varLogOdds=y2(self.a)+y2(self.b)
+        self.sdLogOdds=math.sqrt(self.varLogOdds)
         self.dmda=1/self.a
         self.dmdb=-1/self.b
         self.dvda=-self.dmda*self.dmda
@@ -101,7 +107,7 @@ class BetaDist:
         self.b+=b
         self.updateStats()
     def copy(self)->'BetaDist':
-        return BetaDist(self.a,self.b,self.mean,self.meanLO,self.varLO,self.sdLO,self.dmda,self.dmdb,self.dvda,self.dvdb)
+        return BetaDist(self.a,self.b,self.mean,self.meanLO,self.varLO,self.sdLO,self.meanLogOdds,self.varLogOdds,self.sdLogOdds,self.dmda,self.dmdb,self.dvda,self.dvdb)
     
     def __repr__(self) -> str:
         return f"({self.a},{self.b})"

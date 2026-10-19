@@ -1,4 +1,5 @@
-from typing import List, Optional, Set, Union
+import math
+from typing import Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -79,7 +80,25 @@ class LIMA:
 
         n = self.getStepSize(iteration)
         result = self.sampler.sample(sched, self.domain, self.predicate_groups, self.state, n)
-        self.state.update(result.counts, self.devs)
+
+        edge_results: Dict[Lattice.Edge, Tuple[int, int]] = {}
+        for child, child_counts in result.counts.items():
+            child_a = child_counts[0]
+
+            for pg in child.preds:
+                edge = child.fr(pg)  # parent -> child
+                parent_counts = result.counts.get(edge.fr())
+                if parent_counts is None:
+                    continue  # direct subset wasn't sampled this round
+
+                parent_a = parent_counts[0]
+                if parent_a == 0:
+                    continue
+                if child_a > parent_a:
+                    continue  # scaled top-up counts can break nesting
+                edge_results[edge] = (child_a, parent_a - child_a)
+
+        self.state.update(result.counts, self.devs, edge_results=edge_results)
         return False
 
     def deadEnds(self) -> Set[Lattice.Node]:
@@ -106,24 +125,26 @@ class LIMA:
     def relatedness(self) -> npt.NDArray[np.float64]:
         """Relatedness matrix between predicate groups (attributes).
 
-        For every sound edge parent->child adding predicate group c to
+        For every sampled edge parent->child adding predicate group c to
         parent (parent's active groups being e.g. {a, b, ...}), this uses
         `state._minSoundZ(edge)` and, for every predicate group x already
         active in parent, keeps the largest -z seen for entry [x, c].
 
-        A larger entry[x, y] means a stronger (more negative z) soundness
+        A larger entry[x, y] means a stronger (more negative z) conditional
         signal was found for some edge that adds y on top of a node already
         containing x.
         """
         npgs = len(self.predicate_groups)
         matrix: npt.NDArray[np.float64] = np.full((npgs, npgs), 0.0)
 
-        for edge in self.state.soundEdges:
-            c = edge.pg
-            value = -self.state._minSoundZ(edge)
-            parent = edge.fr()
-            for x in parent.preds:
-                if value > matrix[x, c]:
-                    matrix[x, c] = value
+        for edge in self.state.exploredEdges():
+            z = self.state._minSoundZ(edge)
+            if not math.isfinite(z):
+                continue
+
+            value = -z
+            for x in edge.fr().preds:
+                if value > matrix[x, edge.pg]:
+                    matrix[x, edge.pg] = value
 
         return matrix
